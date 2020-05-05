@@ -73,13 +73,17 @@ func (a *AggregateActivity) Metadata() *activity.Metadata {
 // Eval implements api.Activity.Eval - Aggregates the Message
 func (a *AggregateActivity) Eval(ctx activity.Context) (done bool, err error) {
 
-	//todo move to Activity instance creation
+	activityLogger.Info("Executing Aggregate activity")
+
 	settings, err := getSettings(ctx)
 	if err != nil {
 		return false, err
 	}
 
 	ss, ok := activity.GetSharedTempDataSupport(ctx)
+
+	activityLogger.Info("GetSharedTempData: ", ok)
+
 	if !ok {
 		return false, fmt.Errorf("AggregateActivity not supported by this activity host")
 	}
