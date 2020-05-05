@@ -4,53 +4,93 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/TIBCOSoftware/flogo-contrib/activity/aggregate"
 	"github.com/TIBCOSoftware/flogo-contrib/activity/aggregate/window"
 	"github.com/TIBCOSoftware/flogo-lib/core/activity"
+	"github.com/TIBCOSoftware/flogo-lib/core/data"
 	"github.com/TIBCOSoftware/flogo-lib/logger"
 	"github.com/magallardo/flogo-contrib/activity/aggregate/support"
 )
 
+// activityLogger is the default logger for the Aggregate Activity
+var activityLogger = logger.GetLogger("activity-aggregate")
+
 const (
-	ivFunction           = "function"
-	ivWindowType         = "windowType"
-	ivWindowSize         = "windowSize"
-	ivResolution         = "resolution"
-	ivProceedOnlyOnEmit  = "proceedOnlyOnEmit"
-	ivAdditionalSettings = "additionalSettings"
+	sFunction           = "function"
+	sWindowType         = "windowType"
+	sWindowSize         = "windowSize"
+	sResolution         = "resolution"
+	sProceedOnlyOnEmit  = "proceedOnlyOnEmit"
+	sAdditionalSettings = "additionalSettings"
 
 	ivValue = "value"
 
 	ovResult = "result"
 	ovReport = "report"
-
-	sdWindow = "window"
 )
 
-var activityLog = logger.GetLogger("tibco-activity-aggregate")
+//we can generate json from this! - we could also create a "validate-able" object from this
+type Settings struct {
+	Function           string `md:"function,required,allowed(avg,sum,min,max,count)"`
+	WindowType         string `md:"windowType,required,allowed(tumbling,sliding,timeTumbling,timeSliding)"`
+	WindowSize         int    `md:"windowSize,required"`
+	ProceedOnlyOnEmit  bool
+	Resolution         int
+	AdditionalSettings map[string]string
+}
 
+func init() {
+	activityLogger.SetLogLevel(logger.InfoLevel)
+}
+
+var metadata *activity.Metadata
+
+func New(config *activity.Config) (activity.Activity, error) {
+	act := &AggregateActivity{mutex: &sync.RWMutex{}}
+
+	//todo implement
+	//config.Settings
+
+	return act, nil
+}
+
+// AggregateActivity is an Activity that is used to Aggregate a message to the console
 type AggregateActivity struct {
-	metadata *activity.Metadata
-	mutex    sync.Mutex
+	settings *Settings
+	mutex    *sync.RWMutex
 }
 
-func NewActivity(metadata *activity.Metadata) activity.Activity {
-	return &AggregateActivity{metadata: metadata}
+// NewActivity creates a new AppActivity
+func NewActivity(md *activity.Metadata) activity.Activity {
+	metadata = md
+	activity.RegisterFactory(md.ID, New)
+	return &AggregateActivity{mutex: &sync.RWMutex{}}
 }
 
+// Metadata returns the activity's metadata
 func (a *AggregateActivity) Metadata() *activity.Metadata {
-	return a.metadata
+	return metadata
 }
 
-func (a *AggregateActivity) Eval(context activity.Context) (done bool, err error) {
-	activityLog.Info("Executing Aggregate activity")
+// Eval implements api.Activity.Eval - Aggregates the Message
+func (a *AggregateActivity) Eval(ctx activity.Context) (done bool, err error) {
 
-	sharedDataSupport, _ := activity.GetSharedTempDataSupport(context)
-	sharedData := sharedDataSupport.GetSharedTempData()
-	wv, defined := sharedData[sdWindow]
+	//todo move to Activity instance creation
+	settings, err := getSettings(ctx)
+	if err != nil {
+		return false, err
+	}
 
-	timerSupport, timerSupported := support.GetTimerSupport(context)
+	ss, ok := activity.GetSharedTempDataSupport(ctx)
+	if !ok {
+		return false, fmt.Errorf("AggregateActivity not supported by this activity host")
+	}
+
+	sharedData := ss.GetSharedTempData()
+	wv, defined := sharedData["window"]
+
+	timerSupport, timerSupported := support.GetTimerSupport(ctx)
 
 	var w window.Window
 
@@ -60,18 +100,18 @@ func (a *AggregateActivity) Eval(context activity.Context) (done bool, err error
 
 		a.mutex.Lock()
 
-		wv, defined = sharedData[sdWindow]
+		wv, defined = sharedData["window"]
 		if defined {
 			w = wv.(window.Window)
 		} else {
-			w, err = a.createWindow(context)
+			w, err = createWindow(ctx, settings)
 
 			if err != nil {
 				a.mutex.Unlock()
 				return false, err
 			}
 
-			sharedData[sdWindow] = w
+			sharedData["window"] = w
 		}
 
 		a.mutex.Unlock()
@@ -79,13 +119,7 @@ func (a *AggregateActivity) Eval(context activity.Context) (done bool, err error
 		w = wv.(window.Window)
 	}
 
-	//Read Inputs
-	if context.GetInput(ivValue) == nil {
-		// Value is not configured
-		// return error to the engine
-		return false, activity.NewError("Value is not configured", "AGGREGATE-4001", nil)
-	}
-	in := context.GetInput(ivValue)
+	in := ctx.GetInput(ivValue)
 
 	emit, result := w.AddSample(in)
 
@@ -93,94 +127,140 @@ func (a *AggregateActivity) Eval(context activity.Context) (done bool, err error
 		timerSupport.UpdateTimer(true)
 	}
 
-	err = context.SetOutput(ovResult, result)
+	ctx.SetOutput(ovResult, result)
+	ctx.SetOutput(ovReport, emit)
 
-	if err != nil {
-		return false, err
-	}
-
-	err = context.SetOutput(ovReport, emit)
-	if err != nil {
-		return false, err
-	}
-
-	proceedOnlyOnEmit := context.GetInput(ivProceedOnlyOnEmit).(bool)
-	done = !(proceedOnlyOnEmit && !emit)
+	done = !(settings.ProceedOnlyOnEmit && !emit)
 
 	return done, nil
 }
 
-func (a *AggregateActivity) createWindow(context activity.Context) (w window.Window, err error) {
+func createWindow(ctx activity.Context, settings *Settings) (w window.Window, err error) {
 
-	function := context.GetInput(ivFunction).(string)
-	windowType := context.GetInput(ivWindowType).(string)
-	windowSize := context.GetInput(ivWindowSize).(int)
-	resolution := context.GetInput(ivResolution).(int)
-	proceedOnlyOnEmit := context.GetInput(ivProceedOnlyOnEmit).(bool)
-	additionalSettingsParams, _ := toParams(context.GetInput(ivAdditionalSettings).(string))
-	additionalSettings := additionalSettingsParams
+	timerSupport, timerSupported := support.GetTimerSupport(ctx)
 
-	timerSupport, timerSupported := support.GetTimerSupport(context)
+	windowSettings := &window.Settings{Size: settings.WindowSize, ExternalTimer: timerSupported, Resolution: settings.Resolution}
+	windowSettings.SetAdditionalSettings(settings.AdditionalSettings)
 
-	windowSettings := &window.Settings{Size: windowSize, ExternalTimer: timerSupported, Resolution: resolution}
-	err = windowSettings.SetAdditionalSettings(additionalSettings)
-	if err != nil {
-		return nil, err
-	}
-
-	wType := strings.ToLower(windowType)
+	wType := strings.ToLower(settings.WindowType)
 
 	switch wType {
 	case "tumbling":
-		w, err = aggregate.NewTumblingWindow(function, windowSettings)
+		w, err = NewTumblingWindow(settings.Function, windowSettings)
 	case "sliding":
-		w, err = aggregate.NewSlidingWindow(function, windowSettings)
+		w, err = NewSlidingWindow(settings.Function, windowSettings)
 	case "timetumbling":
-		w, err = aggregate.NewTumblingTimeWindow(function, windowSettings)
-		// if err == nil && timerSupported {
-		// 	err = timerSupport.CreateTimer(time.Duration(windowSize)*time.Millisecond, a.moveWindow, true)
-		// }
+		w, err = NewTumblingTimeWindow(settings.Function, windowSettings)
+		if timerSupported {
+			timerSupport.CreateTimer(time.Duration(settings.WindowSize)*time.Millisecond, moveWindow, true)
+		}
 	case "timesliding":
-		w, err = aggregate.NewSlidingTimeWindow(function, windowSettings)
-		// if err == nil && timerSupported {
-		// 	err = timerSupport.CreateTimer(time.Duration(resolution)*time.Millisecond, a.moveWindow, true)
-		// }
+		w, err = NewSlidingTimeWindow(settings.Function, windowSettings)
+		if timerSupported {
+			timerSupport.CreateTimer(time.Duration(settings.Resolution)*time.Millisecond, moveWindow, true)
+		}
 	default:
-		return nil, fmt.Errorf("unsupported window type: '%s'", windowType)
+		return nil, fmt.Errorf("unsupported window type: '%s'", settings.WindowType)
 	}
 
 	return w, err
 }
 
-func (a *AggregateActivity) moveWindow(context activity.Context) bool {
+func (a *AggregateActivity) PostEval(ctx activity.Context, userData interface{}) (done bool, err error) {
+	return true, nil
+}
 
-	proceedOnlyOnEmit := context.GetInput(ivProceedOnlyOnEmit).(bool)
-	sharedData := GetSharedTempDataSupport(context)
+func moveWindow(ctx activity.Context) bool {
 
-	wv, _ := sharedData[sdWindow]
+	ss, _ := activity.GetSharedTempDataSupport(ctx)
+	sharedData := ss.GetSharedTempData()
+
+	wv, _ := sharedData["window"]
 
 	w, _ := wv.(window.TimeWindow)
 
 	emit, result := w.NextBlock()
 
-	err := context.SetOutput(ovResult, result)
-	if err != nil {
-		//todo log error?
+	ctx.SetOutput(ovResult, result)
+	ctx.SetOutput(ovReport, emit)
+
+	poe := true // by default only proceed on emit
+	poeSetting, exists := ctx.GetSetting(sProceedOnlyOnEmit)
+	if exists {
+		poe, _ = data.CoerceToBoolean(poeSetting)
 	}
 
-	err = context.SetOutput(ovReport, emit)
-	if err != nil {
-		//todo log error?
+	return !(poe && !emit)
+}
+
+func getSettings(ctx activity.Context) (*Settings, error) {
+
+	settings := &Settings{}
+
+	settings.Function = "avg" // default function
+	setting, exists := ctx.GetSetting(sFunction)
+	if exists {
+		val, err := data.CoerceToString(setting)
+		if err == nil {
+			settings.Function = val
+		}
 	}
 
-	return !(proceedOnlyOnEmit && !emit)
+	settings.WindowType = "tumbling" // default window type
+	setting, exists = ctx.GetSetting(sWindowType)
+	if exists {
+		val, err := data.CoerceToString(setting)
+		if err == nil {
+			settings.WindowType = val
+		}
+	}
+
+	settings.WindowSize = 5 // default window resolution
+	setting, exists = ctx.GetSetting(sWindowSize)
+	if exists {
+		val, err := data.CoerceToInteger(setting)
+		if err == nil {
+			settings.WindowSize = val
+		}
+	}
+
+	settings.Resolution = 1 // default window resolution
+	setting, exists = ctx.GetSetting(sResolution)
+	if exists {
+		val, err := data.CoerceToInteger(setting)
+		if err == nil {
+			settings.Resolution = val
+		}
+	}
+
+	settings.ProceedOnlyOnEmit = true // by default only proceed on emit
+	setting, exists = ctx.GetSetting(sProceedOnlyOnEmit)
+	if exists {
+		val, err := data.CoerceToBoolean(setting)
+		if err == nil {
+			settings.ProceedOnlyOnEmit = val
+		}
+	}
+
+	setting, exists = ctx.GetSetting(sAdditionalSettings)
+	if exists {
+		val, err := data.CoerceToString(setting)
+		if err == nil {
+
+			settings.AdditionalSettings, err = toParams(val)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// settings validation can be done here once activities are created on configuration instead of
+	// setting up during runtime
+
+	return settings, nil
 }
 
 func toParams(values string) (map[string]string, error) {
-
-	if values == "" {
-		return map[string]string{}, nil
-	}
 
 	var params map[string]string
 
