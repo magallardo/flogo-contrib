@@ -8,7 +8,6 @@ import (
 
 	"github.com/TIBCOSoftware/flogo-contrib/activity/aggregate/window"
 	"github.com/TIBCOSoftware/flogo-lib/core/activity"
-	"github.com/TIBCOSoftware/flogo-lib/core/data"
 	"github.com/TIBCOSoftware/flogo-lib/logger"
 	"github.com/magallardo/flogo-contrib/activity/aggregate/support"
 )
@@ -28,6 +27,8 @@ const (
 
 	ovResult = "result"
 	ovReport = "report"
+
+	sdWindow = "window"
 )
 
 //we can generate json from this! - we could also create a "validate-able" object from this
@@ -57,20 +58,18 @@ func New(config *activity.Config) (activity.Activity, error) {
 
 // AggregateActivity is an Activity that is used to Aggregate a message to the console
 type AggregateActivity struct {
-	settings *Settings
+	metadata *activity.Metadata
 	mutex    *sync.RWMutex
 }
 
 // NewActivity creates a new AppActivity
 func NewActivity(md *activity.Metadata) activity.Activity {
-	metadata = md
-	activity.RegisterFactory(md.ID, New)
-	return &AggregateActivity{mutex: &sync.RWMutex{}}
+	return &AggregateActivity{mutex: &sync.RWMutex{}, metadata: metadata}
 }
 
 // Metadata returns the activity's metadata
 func (a *AggregateActivity) Metadata() *activity.Metadata {
-	return metadata
+	return a.metadata
 }
 
 // Eval implements api.Activity.Eval - Aggregates the Message
@@ -88,7 +87,7 @@ func (a *AggregateActivity) Eval(ctx activity.Context) (done bool, err error) {
 	}
 
 	sharedData := ss.GetSharedTempData()
-	wv, defined := sharedData["window"]
+	wv, defined := sharedData[sdWindow]
 
 	timerSupport, timerSupported := support.GetTimerSupport(ctx)
 
@@ -100,7 +99,7 @@ func (a *AggregateActivity) Eval(ctx activity.Context) (done bool, err error) {
 
 		a.mutex.Lock()
 
-		wv, defined = sharedData["window"]
+		wv, defined = sharedData[sdWindow]
 		if defined {
 			w = wv.(window.Window)
 		} else {
@@ -111,7 +110,7 @@ func (a *AggregateActivity) Eval(ctx activity.Context) (done bool, err error) {
 				return false, err
 			}
 
-			sharedData["window"] = w
+			sharedData[sdWindow] = w
 		}
 
 		a.mutex.Unlock()
@@ -175,7 +174,7 @@ func moveWindow(ctx activity.Context) bool {
 	ss, _ := activity.GetSharedTempDataSupport(ctx)
 	sharedData := ss.GetSharedTempData()
 
-	wv, _ := sharedData["window"]
+	wv, _ := sharedData[sdWindow]
 
 	w, _ := wv.(window.TimeWindow)
 
@@ -184,11 +183,7 @@ func moveWindow(ctx activity.Context) bool {
 	ctx.SetOutput(ovResult, result)
 	ctx.SetOutput(ovReport, emit)
 
-	poe := true // by default only proceed on emit
-	poeSetting, exists := ctx.GetSetting(sProceedOnlyOnEmit)
-	if exists {
-		poe, _ = data.CoerceToBoolean(poeSetting)
-	}
+	poe := ctx.GetInput(sProceedOnlyOnEmit).(bool)
 
 	return !(poe && !emit)
 }
@@ -197,62 +192,12 @@ func getSettings(ctx activity.Context) (*Settings, error) {
 
 	settings := &Settings{}
 
-	settings.Function = "avg" // default function
-	setting, exists := ctx.GetSetting(sFunction)
-	if exists {
-		val, err := data.CoerceToString(setting)
-		if err == nil {
-			settings.Function = val
-		}
-	}
-
-	settings.WindowType = "tumbling" // default window type
-	setting, exists = ctx.GetSetting(sWindowType)
-	if exists {
-		val, err := data.CoerceToString(setting)
-		if err == nil {
-			settings.WindowType = val
-		}
-	}
-
-	settings.WindowSize = 5 // default window resolution
-	setting, exists = ctx.GetSetting(sWindowSize)
-	if exists {
-		val, err := data.CoerceToInteger(setting)
-		if err == nil {
-			settings.WindowSize = val
-		}
-	}
-
-	settings.Resolution = 1 // default window resolution
-	setting, exists = ctx.GetSetting(sResolution)
-	if exists {
-		val, err := data.CoerceToInteger(setting)
-		if err == nil {
-			settings.Resolution = val
-		}
-	}
-
-	settings.ProceedOnlyOnEmit = true // by default only proceed on emit
-	setting, exists = ctx.GetSetting(sProceedOnlyOnEmit)
-	if exists {
-		val, err := data.CoerceToBoolean(setting)
-		if err == nil {
-			settings.ProceedOnlyOnEmit = val
-		}
-	}
-
-	setting, exists = ctx.GetSetting(sAdditionalSettings)
-	if exists {
-		val, err := data.CoerceToString(setting)
-		if err == nil {
-
-			settings.AdditionalSettings, err = toParams(val)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
+	settings.Function = ctx.GetInput(sFunction).(string)
+	settings.WindowType = ctx.GetInput(sWindowType).(string)
+	settings.WindowSize = ctx.GetInput(sWindowSize).(int)
+	settings.Resolution = ctx.GetInput(sResolution).(int)
+	settings.ProceedOnlyOnEmit = ctx.GetInput(sProceedOnlyOnEmit).(bool)
+	settings.AdditionalSettings, _ = toParams(ctx.GetInput(sAdditionalSettings).(string))
 
 	// settings validation can be done here once activities are created on configuration instead of
 	// setting up during runtime
@@ -261,6 +206,10 @@ func getSettings(ctx activity.Context) (*Settings, error) {
 }
 
 func toParams(values string) (map[string]string, error) {
+
+	if values == "" {
+		return map[string]string{}, nil
+	}
 
 	var params map[string]string
 
