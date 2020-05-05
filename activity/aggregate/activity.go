@@ -62,7 +62,7 @@ type AggregateActivity struct {
 
 // NewActivity creates a new AppActivity
 func NewActivity(md *activity.Metadata) activity.Activity {
-	return &AggregateActivity{mutex: &sync.RWMutex{}, metadata: metadata}
+	return &AggregateActivity{mutex: &sync.RWMutex{}, metadata: md}
 }
 
 // Metadata returns the activity's metadata
