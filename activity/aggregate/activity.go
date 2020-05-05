@@ -45,8 +45,6 @@ func init() {
 	activityLogger.SetLogLevel(logger.InfoLevel)
 }
 
-var metadata *activity.Metadata
-
 func New(config *activity.Config) (activity.Activity, error) {
 	act := &AggregateActivity{mutex: &sync.RWMutex{}}
 
